@@ -167,6 +167,7 @@ export function parseICS(ics: string, opts: ParseOptions): Meeting[] {
 			while (count < MAX_RECURRENCE_OCCURRENCES) {
 				const next = iter.next();
 				if (!next) break;
+				let occurrenceEvent = event;
 				let start: Date;
 				let end: Date;
 				let overrideCancelled = false;
@@ -174,6 +175,7 @@ export function parseICS(ics: string, opts: ParseOptions): Meeting[] {
 					const details = event.getOccurrenceDetails(next);
 					start = details.startDate.toJSDate();
 					end = details.endDate.toJSDate();
+					occurrenceEvent = details.item as unknown as MinimalEvent;
 					// Single-occurrence cancellation: the override VEVENT has
 					// its own STATUS:CANCELLED. ical.js still iterates the slot,
 					// so we have to check the override item ourselves.
@@ -213,7 +215,7 @@ export function parseICS(ics: string, opts: ParseOptions): Meeting[] {
 					continue;
 				}
 				count++;
-				const meeting = buildMeeting(event, start, end, calendar);
+				const meeting = buildMeeting(occurrenceEvent, start, end, calendar, event);
 				if (acceptable(meeting, calendar, seen)) meetings.push(meeting);
 			}
 		} else {
@@ -244,16 +246,22 @@ function buildMeeting(
 	event: MinimalEvent,
 	start: Date,
 	end: Date,
-	calendar: CalendarConfig
+	calendar: CalendarConfig,
+	masterEvent?: MinimalEvent
 ): Meeting {
-	const allDay = Boolean(event.startDate?.isDate);
-	const title = (event.summary ?? "").toString().trim() || "(no title)";
-	const location = (event.location ?? "").toString();
-	const description = stripHTML((event.description ?? "").toString());
-	const organizer = cleanContact(String(event.organizer ?? ""));
+	const fallbackEvent = masterEvent ?? event;
+	const allDay = Boolean(event.startDate?.isDate ?? fallbackEvent.startDate?.isDate);
+	const title = (event.summary ?? fallbackEvent.summary ?? "").toString().trim() || "(no title)";
+	const location = (event.location ?? fallbackEvent.location ?? "").toString();
+	const description = stripHTML((event.description ?? fallbackEvent.description ?? "").toString());
+	const organizer = cleanContact(String(event.organizer ?? fallbackEvent.organizer ?? ""));
 
 	const attendees: string[] = [];
-	for (const prop of event.component.getAllProperties("attendee")) {
+	let attendeeProps = event.component.getAllProperties("attendee");
+	if (attendeeProps.length === 0 && fallbackEvent !== event) {
+		attendeeProps = fallbackEvent.component.getAllProperties("attendee");
+	}
+	for (const prop of attendeeProps) {
 		const cn = prop.getParameter("cn");
 		if (cn) {
 			attendees.push(cn);
@@ -263,9 +271,13 @@ function buildMeeting(
 		if (typeof v === "string") attendees.push(cleanContact(v));
 	}
 
-	const teamsUrl = event.component.getFirstPropertyValue<string>(
-		"x-microsoft-skypeteamsmeetingurl"
-	);
+	const teamsUrl =
+		event.component.getFirstPropertyValue<string>(
+			"x-microsoft-skypeteamsmeetingurl"
+		) ||
+		fallbackEvent.component.getFirstPropertyValue<string>(
+			"x-microsoft-skypeteamsmeetingurl"
+		);
 	const meetingUrl =
 		(teamsUrl && String(teamsUrl)) ||
 		detectMeetingUrl(location) ||
@@ -275,11 +287,11 @@ function buildMeeting(
 		"";
 
 	const startISO = start.toISOString().slice(0, 10);
-	const dedupKey = `${calendar.id}::${event.uid}::${startISO}`;
+	const dedupKey = `${calendar.id}::${fallbackEvent.uid}::${startISO}`;
 
 	return {
 		dedupKey,
-		uid: event.uid,
+		uid: fallbackEvent.uid,
 		calendarId: calendar.id,
 		title,
 		start,
